@@ -1449,9 +1449,6 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--html", metavar="PATH",
                    help="Write a self-contained HTML report to this path. "
                         "Suitable for emailing, archiving, or hosting as a static file.")
-    p.add_argument("--html", metavar="PATH",
-                   help="Write a self-contained HTML report to this path. The file embeds CSS "
-                        "and JS, has no external dependencies, and is safe to email or upload.")
     p.add_argument("--confirm", action="store_true",
                    help="Confirm you have authorization to scan these targets.")
     return p
