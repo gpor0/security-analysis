@@ -88,6 +88,7 @@ At least one of `-t` or `-f` must be supplied.
 | `--show-closed` | (off) | open only | Include closed and filtered ports in the text report. By default the report only shows open ports to keep output skimmable; turn this on if you need to confirm a port is firewalled rather than just absent. |
 | `--text` | path | none | Write the text report to this file in addition to printing it to stdout. |
 | `--json` | path | none | Write the full structured JSON report to this file. JSON includes every field — closed ports, raw banner bytes, TLS cert details, HTTP headers — regardless of `--show-closed`. |
+| `--html` | path | none | Write a self-contained HTML report. Embedded CSS and JS, no external dependencies — safe to email or upload as a single file. Includes summary stat cards, a top-of-report TLS findings callout, expand/collapse-all controls, and a "show only hosts with findings" filter. Supports both light and dark OS themes via `prefers-color-scheme`. |
 
 ### Safety
 
@@ -221,6 +222,34 @@ JSON is suitable for:
 - Ingestion into ELK, Splunk, or a custom database.
 - Triggering automation (e.g. "fail CI if any host has a port outside an allowlist").
 
+### HTML report (`--html`)
+
+A single self-contained file with embedded CSS and JS — no external resources, safe to email or attach to a ticket. Designed for handing to stakeholders who need to skim findings without running `jq` queries.
+
+Top of the report:
+- Title bar with generation timestamp, port profile used, and the User-Agent the scan ran with.
+- Four stat cards: total hosts, total open ports, deprecated-TLS finding count (red if non-zero), weak-cipher count (orange if non-zero).
+- TLS findings callout block — only rendered if findings exist; lists every `host:port → finding` in a prominent red-bordered box.
+
+Per-host sections:
+- Each host is a collapsible `<details>` block. Hosts with findings are auto-expanded; clean hosts are collapsed by default if the report has more than 5 hosts.
+- Summary line shows host, IP, reverse DNS, an "open" badge with port count, and a "Findings" badge in red if any TLS issues were detected.
+- Inside each host is a sortable port table with columns Port / State / Service / Details. Rows are color-coded: red background for deprecated-TLS rows, orange for weak-cipher rows, plain for everything else.
+- The Details column embeds banner output, TLS info (with severity-tag pills like `[DEPRECATED TLS]`), certificate fields, and parsed HTTP response fields (status line, server header, title, body preview).
+
+Interactive controls in the toolbar:
+- **Expand all** / **Collapse all** buttons for jumping through large reports.
+- **Show only hosts with findings** checkbox that filters the host list to just the problematic ones.
+
+The report respects `prefers-color-scheme: dark`, so analysts on dark-mode systems get a properly themed report automatically.
+
+**Security note**: all values from scanned targets (banners, certificate subjects, HTTP titles, server headers) are HTML-escaped before being written to the report. A malicious or misconfigured target cannot inject script into your report by setting a hostile `Server` header or certificate CN.
+
+Use cases:
+- Sharing findings with developers or management who don't want to read JSON.
+- Attaching as evidence to a pentest report or audit ticket.
+- Quick visual review of large scans where the text report would be too dense to skim.
+
 ---
 
 ## User-Agent
@@ -349,6 +378,16 @@ python portscan.py -f cluster-nodes.txt -p k8s+monitoring \
   --json cluster-scan-$(date +%F).json \
   --text cluster-scan-$(date +%F).txt \
   --confirm
+```
+
+### Report for stakeholders (HTML)
+
+```bash
+# Scan, produce a shareable HTML report with summary stats and findings callouts
+python portscan.py -f targets.txt -p common+k8s+monitoring \
+  --html audit-2026Q2.html --confirm
+
+# Open in browser to review, or email/attach to a ticket
 ```
 
 ### Drift detection between scans
