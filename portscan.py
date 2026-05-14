@@ -17,6 +17,7 @@ import argparse
 import concurrent.futures
 import dataclasses
 import datetime as dt
+import html
 import ipaddress
 import json
 import socket
@@ -894,6 +895,499 @@ def to_json(hosts: list[HostResult]) -> str:
     return json.dumps([conv(h) for h in hosts], indent=2)
 
 
+# -------- HTML reporting --------
+
+_HTML_CSS = """
+:root {
+  --bg: #0f1419;
+  --bg-elev: #161b22;
+  --bg-card: #1c2128;
+  --border: #30363d;
+  --text: #e6edf3;
+  --text-dim: #8b949e;
+  --accent: #58a6ff;
+  --ok: #3fb950;
+  --warn: #d29922;
+  --crit: #f85149;
+  --code-bg: #0d1117;
+  --mono: ui-monospace, "SF Mono", "Cascadia Code", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: light) {
+  :root {
+    --bg: #ffffff;
+    --bg-elev: #f6f8fa;
+    --bg-card: #ffffff;
+    --border: #d0d7de;
+    --text: #1f2328;
+    --text-dim: #59636e;
+    --accent: #0969da;
+    --ok: #1a7f37;
+    --warn: #9a6700;
+    --crit: #cf222e;
+    --code-bg: #f6f8fa;
+  }
+}
+* { box-sizing: border-box; }
+body {
+  margin: 0;
+  padding: 24px;
+  background: var(--bg);
+  color: var(--text);
+  font: 14px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+}
+.container { max-width: 1200px; margin: 0 auto; }
+h1 { margin: 0 0 4px; font-size: 24px; font-weight: 600; }
+h2 { margin: 32px 0 12px; font-size: 18px; font-weight: 600; }
+h3 { margin: 0; font-size: 15px; font-weight: 600; }
+.subtitle { color: var(--text-dim); margin-bottom: 24px; font-size: 13px; }
+.meta-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+  margin-bottom: 24px;
+  padding: 16px;
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+.meta-grid .label { color: var(--text-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; }
+.meta-grid .value { font-size: 18px; font-weight: 600; margin-top: 2px; }
+.meta-grid .value.crit { color: var(--crit); }
+.meta-grid .value.warn { color: var(--warn); }
+.meta-grid .value.ok { color: var(--ok); }
+
+.findings-panel {
+  background: var(--bg-card);
+  border: 1px solid var(--crit);
+  border-left: 4px solid var(--crit);
+  border-radius: 8px;
+  padding: 16px 20px;
+  margin-bottom: 24px;
+}
+.findings-panel h2 { margin-top: 0; color: var(--crit); }
+.findings-panel ul { margin: 0; padding-left: 20px; }
+.findings-panel li { margin: 4px 0; }
+.findings-panel .ref { color: var(--accent); font-family: var(--mono); font-size: 12px; }
+
+details.host {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  margin-bottom: 12px;
+  overflow: hidden;
+}
+details.host[open] { background: var(--bg-card); }
+details.host summary {
+  padding: 14px 18px;
+  cursor: pointer;
+  user-select: none;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  list-style: none;
+}
+details.host summary::-webkit-details-marker { display: none; }
+details.host summary::before {
+  content: "▸";
+  color: var(--text-dim);
+  transition: transform 0.15s;
+  display: inline-block;
+  width: 12px;
+}
+details.host[open] summary::before { transform: rotate(90deg); }
+.host-summary-target { font-weight: 600; font-family: var(--mono); }
+.host-summary-meta { color: var(--text-dim); font-size: 13px; margin-left: auto; }
+.host-summary-meta .pill { margin-left: 8px; }
+
+.pill {
+  display: inline-block;
+  padding: 2px 8px;
+  border-radius: 12px;
+  font-size: 11px;
+  font-weight: 600;
+  font-family: var(--mono);
+}
+.pill.ok    { background: rgba(63, 185, 80, 0.15);  color: var(--ok); }
+.pill.warn  { background: rgba(210, 153, 34, 0.15); color: var(--warn); }
+.pill.crit  { background: rgba(248, 81, 73, 0.15);  color: var(--crit); }
+.pill.neutral { background: rgba(139, 148, 158, 0.15); color: var(--text-dim); }
+
+.host-body { padding: 0 18px 18px; }
+.host-meta {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 8px 24px;
+  padding: 12px 0;
+  border-top: 1px solid var(--border);
+  font-size: 13px;
+}
+.host-meta .k { color: var(--text-dim); margin-right: 6px; }
+.host-meta .v { font-family: var(--mono); }
+
+table.ports {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 12px;
+  font-size: 13px;
+}
+table.ports th {
+  text-align: left;
+  padding: 8px 10px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+  font-weight: 600;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+table.ports td {
+  padding: 10px;
+  border-bottom: 1px solid var(--border);
+  vertical-align: top;
+}
+table.ports tr:last-child td { border-bottom: none; }
+table.ports tr.row-crit { background: rgba(248, 81, 73, 0.05); }
+table.ports tr.row-warn { background: rgba(210, 153, 34, 0.05); }
+.port-num { font-family: var(--mono); font-weight: 600; }
+.svc { color: var(--text-dim); font-family: var(--mono); }
+
+.detail-block {
+  margin-top: 6px;
+  padding: 8px 10px;
+  background: var(--code-bg);
+  border-radius: 4px;
+  font-family: var(--mono);
+  font-size: 12px;
+  line-height: 1.5;
+  word-break: break-word;
+}
+.detail-block .k { color: var(--text-dim); }
+.detail-block .v { color: var(--text); }
+.detail-block .finding { color: var(--crit); font-weight: 600; }
+.detail-block .warn-text { color: var(--warn); }
+.detail-block + .detail-block { margin-top: 4px; }
+.banner { font-family: var(--mono); font-size: 12px; color: var(--text-dim); word-break: break-all; }
+
+.no-findings {
+  background: var(--bg-elev);
+  border: 1px solid var(--border);
+  border-left: 4px solid var(--ok);
+  border-radius: 8px;
+  padding: 12px 16px;
+  margin-bottom: 24px;
+  color: var(--text-dim);
+  font-size: 13px;
+}
+.no-findings strong { color: var(--ok); }
+
+footer {
+  margin-top: 32px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+  color: var(--text-dim);
+  font-size: 12px;
+}
+footer code { font-family: var(--mono); background: var(--code-bg); padding: 1px 5px; border-radius: 3px; }
+"""
+
+
+def _esc(s: object) -> str:
+    """HTML-escape; coerce None and other types safely."""
+    if s is None:
+        return ""
+    return html.escape(str(s), quote=True)
+
+
+def _port_severity(p: PortResult) -> str:
+    """Return 'crit', 'warn', or '' for row styling."""
+    if p.tls_info:
+        tags = p.tls_info.get("severity_tags", []) or []
+        if "DEPRECATED_TLS" in tags:
+            return "crit"
+        if "WEAK_CIPHER" in tags:
+            return "warn"
+    return ""
+
+
+def _render_tls_block(ti: dict) -> str:
+    """Render the TLS section of a port row as HTML."""
+    if not ti:
+        return ""
+    parts: list[str] = ['<div class="detail-block">']
+
+    if "error" in ti and "protocol" not in ti:
+        parts.append(f'<span class="finding">TLS handshake failed:</span> {_esc(ti["error"])}')
+        if ti.get("legacy_error"):
+            parts.append(f'<br><span class="k">Legacy retry also failed:</span> {_esc(ti["legacy_error"])}')
+        parts.append("</div>")
+        return "".join(parts)
+
+    proto = ti.get("protocol", "?")
+    tags = ti.get("severity_tags", []) or []
+    proto_class = "finding" if "DEPRECATED_TLS" in tags else (
+        "warn-text" if "WEAK_CIPHER" in tags else "v"
+    )
+    parts.append(f'<span class="k">Protocol:</span> <span class="{proto_class}">{_esc(proto)}</span>')
+    if ti.get("cipher"):
+        cipher_class = "warn-text" if "WEAK_CIPHER" in tags else "v"
+        parts.append(f' &nbsp; <span class="k">Cipher:</span> <span class="{cipher_class}">{_esc(ti["cipher"])}</span>')
+
+    for finding in ti.get("findings", []) or []:
+        parts.append(f'<br><span class="finding">⚠ {_esc(finding)}</span>')
+
+    if ti.get("modern_handshake_error"):
+        parts.append(f'<br><span class="k">Modern handshake error:</span> {_esc(ti["modern_handshake_error"])}')
+
+    if ti.get("subject"):
+        parts.append(f'<br><span class="k">Subject:</span> {_esc(ti["subject"])}')
+    if ti.get("issuer"):
+        parts.append(f'<br><span class="k">Issuer:</span> {_esc(ti["issuer"])}')
+    if ti.get("not_before") or ti.get("not_after"):
+        parts.append(
+            f'<br><span class="k">Validity:</span> '
+            f'{_esc(ti.get("not_before",""))} → {_esc(ti.get("not_after",""))}'
+        )
+    san = ti.get("san") or []
+    if san:
+        # Truncate very long SAN lists
+        shown = san[:8]
+        more = f" (+{len(san) - 8} more)" if len(san) > 8 else ""
+        parts.append(f'<br><span class="k">SAN:</span> {_esc(", ".join(shown))}{_esc(more)}')
+
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _render_http_block(hi: dict) -> str:
+    """Render the HTTP section of a port row as HTML."""
+    if not hi:
+        return ""
+    parts: list[str] = ['<div class="detail-block">']
+
+    if "error" in hi:
+        parts.append(f'<span class="k">HTTP:</span> <span class="warn-text">{_esc(hi["error"])}</span>')
+        parts.append("</div>")
+        return "".join(parts)
+
+    if "non_http_response" in hi:
+        parts.append(
+            f'<span class="k">HTTP probe got non-HTTP reply:</span> '
+            f'<span class="v">{_esc(hi["non_http_response"])}</span>'
+        )
+        parts.append("</div>")
+        return "".join(parts)
+
+    status = hi.get("status_line", "")
+    if status:
+        parts.append(f'<span class="k">HTTP:</span> <span class="v">{_esc(status)}</span>')
+
+    headers = hi.get("headers", {}) or {}
+    interesting_order = ["server", "x-powered-by", "x-jenkins", "x-prometheus-api-version",
+                         "location", "www-authenticate", "content-type"]
+    header_labels = {
+        "server": "Server",
+        "x-powered-by": "X-Powered-By",
+        "x-jenkins": "X-Jenkins",
+        "x-prometheus-api-version": "X-Prometheus-Api-Version",
+        "location": "Location",
+        "www-authenticate": "WWW-Authenticate",
+        "content-type": "Content-Type",
+    }
+    for k in interesting_order:
+        v = headers.get(k)
+        if v:
+            parts.append(f'<br><span class="k">{header_labels[k]}:</span> <span class="v">{_esc(v)}</span>')
+
+    if hi.get("title"):
+        parts.append(f'<br><span class="k">Title:</span> <span class="v">{_esc(hi["title"])}</span>')
+    elif hi.get("body_preview"):
+        parts.append(f'<br><span class="k">Body:</span> <span class="v">{_esc(hi["body_preview"][:160])}</span>')
+
+    parts.append("</div>")
+    return "".join(parts)
+
+
+def _render_port_row(p: PortResult) -> str:
+    """Render one <tr> for the ports table."""
+    sev = _port_severity(p)
+    row_cls = f' class="row-{sev}"' if sev else ""
+
+    state_pill_class = {
+        "open": "ok",
+        "closed": "neutral",
+        "filtered": "warn",
+        "error": "crit",
+    }.get(p.state, "neutral")
+
+    cells: list[str] = []
+    cells.append(f'<td class="port-num">{p.port}</td>')
+    cells.append(f'<td><span class="pill {state_pill_class}">{_esc(p.state)}</span></td>')
+    cells.append(f'<td class="svc">{_esc(p.service or "—")}</td>')
+
+    # Detail column: banner, TLS block, HTTP block, or error message.
+    detail_parts: list[str] = []
+    if p.banner:
+        detail_parts.append(f'<div class="banner">{_esc(p.banner[:300])}</div>')
+    if p.tls_info:
+        detail_parts.append(_render_tls_block(p.tls_info))
+    if p.http_info:
+        detail_parts.append(_render_http_block(p.http_info))
+    if p.error and not detail_parts:
+        detail_parts.append(f'<div class="banner warn-text">{_esc(p.error)}</div>')
+    if not detail_parts:
+        detail_parts.append('<span style="color: var(--text-dim);">—</span>')
+
+    cells.append(f'<td>{"".join(detail_parts)}</td>')
+
+    return f'<tr{row_cls}>{"".join(cells)}</tr>'
+
+
+def fmt_html_report(hosts: list[HostResult], show_closed: bool, metadata: dict | None = None) -> str:
+    """Render the full HTML report as a single self-contained document."""
+    metadata = metadata or {}
+    generated = dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds")
+
+    # Aggregate stats across hosts
+    total_hosts = len(hosts)
+    total_open = sum(len(h.open_ports()) for h in hosts)
+    total_scanned_ports = sum(len(h.ports) for h in hosts)
+    failed_resolution = sum(1 for h in hosts if h.resolution_error)
+
+    # Collect TLS findings across hosts (target, port, finding strings)
+    tls_issues: list[tuple[str, int, list[str]]] = []
+    crit_count = 0
+    warn_count = 0
+    for h in hosts:
+        for p in h.ports:
+            if p.tls_info and p.tls_info.get("findings"):
+                tls_issues.append((h.target, p.port, p.tls_info["findings"]))
+                tags = p.tls_info.get("severity_tags", []) or []
+                if "DEPRECATED_TLS" in tags:
+                    crit_count += 1
+                elif "WEAK_CIPHER" in tags:
+                    warn_count += 1
+
+    # --- Header block ---
+    out: list[str] = []
+    out.append("<!DOCTYPE html>")
+    out.append('<html lang="en"><head>')
+    out.append('<meta charset="utf-8">')
+    out.append('<meta name="viewport" content="width=device-width, initial-scale=1">')
+    out.append(f"<title>Port Scan Report — {_esc(generated)}</title>")
+    out.append(f"<style>{_HTML_CSS}</style>")
+    out.append("</head><body><div class='container'>")
+
+    out.append("<h1>Port Scan Report</h1>")
+    subtitle_bits = [f"Generated {_esc(generated)}"]
+    if metadata.get("user_agent"):
+        subtitle_bits.append(f"UA: <code>{_esc(metadata['user_agent'])}</code>")
+    if metadata.get("port_spec"):
+        subtitle_bits.append(f"Profile: <code>{_esc(metadata['port_spec'])}</code>")
+    out.append(f'<div class="subtitle">{" &nbsp;·&nbsp; ".join(subtitle_bits)}</div>')
+
+    # --- Top metrics grid ---
+    out.append('<div class="meta-grid">')
+    out.append(f'<div><div class="label">Hosts scanned</div><div class="value">{total_hosts}</div></div>')
+    out.append(f'<div><div class="label">Ports per host</div><div class="value">{total_scanned_ports // max(total_hosts,1)}</div></div>')
+    out.append(f'<div><div class="label">Open ports (total)</div><div class="value">{total_open}</div></div>')
+    crit_class = "crit" if crit_count > 0 else "ok"
+    out.append(f'<div><div class="label">Deprecated TLS</div><div class="value {crit_class}">{crit_count}</div></div>')
+    warn_class = "warn" if warn_count > 0 else "ok"
+    out.append(f'<div><div class="label">Weak ciphers</div><div class="value {warn_class}">{warn_count}</div></div>')
+    if failed_resolution:
+        out.append(f'<div><div class="label">DNS failures</div><div class="value warn">{failed_resolution}</div></div>')
+    out.append("</div>")
+
+    # --- TLS findings panel (or "no findings" reassurance) ---
+    if tls_issues:
+        out.append('<section class="findings-panel">')
+        out.append("<h2>⚠ TLS / Cipher Findings</h2>")
+        out.append("<ul>")
+        for target, port, findings in tls_issues:
+            for f in findings:
+                out.append(
+                    f'<li><span class="ref">{_esc(target)}:{port}</span> &nbsp; {_esc(f)}</li>'
+                )
+        out.append("</ul>")
+        out.append("</section>")
+    else:
+        out.append(
+            '<div class="no-findings"><strong>✓ No TLS findings.</strong> '
+            "No deprecated protocol versions or weak ciphers detected on scanned TLS ports.</div>"
+        )
+
+    # --- Per-host sections ---
+    out.append("<h2>Hosts</h2>")
+    for h in hosts:
+        open_count = len(h.open_ports())
+        # Auto-expand hosts that have findings or open ports; collapse clean ones.
+        has_finding = any(
+            (p.tls_info or {}).get("findings") for p in h.ports
+        )
+        open_attr = " open" if (has_finding or open_count > 0) else ""
+
+        # Build summary line
+        pills: list[str] = []
+        if h.resolution_error:
+            pills.append('<span class="pill crit">DNS failed</span>')
+        else:
+            pill_class = "ok" if open_count > 0 else "neutral"
+            pills.append(f'<span class="pill {pill_class}">{open_count} open</span>')
+        if has_finding:
+            pills.append('<span class="pill crit">TLS finding</span>')
+
+        out.append(f"<details class='host'{open_attr}>")
+        out.append("<summary>")
+        out.append(f'<span class="host-summary-target">{_esc(h.target)}</span>')
+        if h.resolved_ip and h.resolved_ip != h.target:
+            out.append(f' <span style="color: var(--text-dim);">({_esc(h.resolved_ip)})</span>')
+        out.append(f'<span class="host-summary-meta">{"".join(pills)}</span>')
+        out.append("</summary>")
+
+        out.append("<div class='host-body'>")
+
+        if h.resolution_error:
+            out.append(
+                f'<div class="host-meta"><div><span class="k">Error:</span> '
+                f'<span class="v" style="color: var(--crit);">{_esc(h.resolution_error)}</span></div></div>'
+            )
+            out.append("</div></details>")
+            continue
+
+        # Per-host metadata
+        out.append('<div class="host-meta">')
+        out.append(f'<div><span class="k">Resolved IP:</span><span class="v"> {_esc(h.resolved_ip)}</span></div>')
+        if h.reverse_dns:
+            out.append(f'<div><span class="k">Reverse DNS:</span><span class="v"> {_esc(h.reverse_dns)}</span></div>')
+        out.append(f'<div><span class="k">Ports scanned:</span><span class="v"> {len(h.ports)}</span></div>')
+        out.append(f'<div><span class="k">Open ports:</span><span class="v"> {open_count}</span></div>')
+        out.append(f'<div><span class="k">Started:</span><span class="v"> {_esc(h.scan_started)}</span></div>')
+        out.append(f'<div><span class="k">Finished:</span><span class="v"> {_esc(h.scan_finished)}</span></div>')
+        out.append("</div>")
+
+        # Port table
+        visible_ports = [p for p in h.ports if show_closed or p.state == "open"]
+        if not visible_ports:
+            out.append('<div style="color: var(--text-dim); padding: 12px 0;">No open ports.</div>')
+        else:
+            out.append("<table class='ports'>")
+            out.append("<thead><tr><th>Port</th><th>State</th><th>Service</th><th>Detail</th></tr></thead>")
+            out.append("<tbody>")
+            for p in visible_ports:
+                out.append(_render_port_row(p))
+            out.append("</tbody></table>")
+
+        out.append("</div></details>")
+
+    # --- Footer ---
+    out.append("<footer>")
+    out.append("Generated by <code>portscan.py</code>. Authorized security assessment use only.")
+    out.append("</footer>")
+    out.append("</div></body></html>")
+    return "\n".join(out)
+
+
+
 # -------- Target loading --------
 
 def load_targets(args: argparse.Namespace) -> list[str]:
@@ -952,6 +1446,12 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--show-closed", action="store_true", help="Include closed/filtered ports in text report.")
     p.add_argument("--json", metavar="PATH", help="Write JSON report to this path.")
     p.add_argument("--text", metavar="PATH", help="Write text report to this path (in addition to stdout).")
+    p.add_argument("--html", metavar="PATH",
+                   help="Write a self-contained HTML report to this path. "
+                        "Suitable for emailing, archiving, or hosting as a static file.")
+    p.add_argument("--html", metavar="PATH",
+                   help="Write a self-contained HTML report to this path. The file embeds CSS "
+                        "and JS, has no external dependencies, and is safe to email or upload.")
     p.add_argument("--confirm", action="store_true",
                    help="Confirm you have authorization to scan these targets.")
     return p
@@ -1004,6 +1504,19 @@ def main(argv: list[str] | None = None) -> int:
     if args.json:
         Path(args.json).write_text(to_json(results))
         print(f"JSON report written to {args.json}", file=sys.stderr)
+
+    if args.html:
+        html_report = fmt_html_report(
+            results,
+            show_closed=args.show_closed,
+            metadata={
+                "port_count": len(ports),
+                "port_spec": args.ports,
+                "user_agent": args.user_agent if not args.no_banner and not args.no_http else None,
+            },
+        )
+        Path(args.html).write_text(html_report, encoding="utf-8")
+        print(f"HTML report written to {args.html}", file=sys.stderr)
 
     return 0
 
